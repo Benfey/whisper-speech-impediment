@@ -116,7 +116,7 @@ def load_custom_dataset():
 
 if __name__ == "__main__":
     # Load the processor and model
-    model_name = "openai/whisper-small"
+    model_name = "openai/whisper-tiny"
     print(f"\nLoading model: {model_name}")
     processor = WhisperProcessor.from_pretrained(model_name)
     model = WhisperForConditionalGeneration.from_pretrained(model_name)
@@ -170,9 +170,9 @@ if __name__ == "__main__":
         per_device_train_batch_size=4,       # Reduced batch size
         per_device_eval_batch_size=4,        # Reduced eval batch size
         gradient_accumulation_steps=4,        # Increased gradient accumulation
-        learning_rate=1e-5,
-        warmup_steps=2,
-        max_steps=100,                       # Reduced steps for small dataset
+        learning_rate=5e-6,
+        warmup_steps=50,
+        max_steps=500,                       # Reduced steps for small dataset
         fp16=True,                           # Enable mixed precision training
         gradient_checkpointing=True,         # Enable gradient checkpointing
         evaluation_strategy="steps",
