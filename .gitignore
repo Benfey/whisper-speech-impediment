@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+env/
+venv/
+.env
+
+# Training
+data/processed/
+data/raw/
+data/text
+data/audio_paths
+whisper-fine-tuned/
+whisper-fine-tuned-final/
+cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
