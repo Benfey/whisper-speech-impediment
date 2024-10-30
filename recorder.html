@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Sentence Recorder</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 20px;
+            text-align: center;
+        }
+        #sentence {
+            font-size: 24px;
+            margin: 20px 0;
+            min-height: 60px;
+            padding: 20px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        #controls {
+            margin: 20px 0;
+        }
+        button {
+            font-size: 18px;
+            margin: 0 10px;
+            padding: 10px 20px;
+            cursor: pointer;
+        }
+        #recordButton {
+            background-color: #ff4444;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            width: 200px;
+        }
+        #recordButton.recording {
+            background-color: #aa0000;
+        }
+        #progress {
+            margin: 20px 0;
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+        #sampleInput {
+            width: 60px;
+            font-size: 18px;
+            padding: 5px;
+            text-align: center;
+        }
+        #navigation {
+            margin: 20px 0;
+        }
+        #timer {
+            font-size: 20px;
+            margin: 10px 0;
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        #status {
+            margin: 10px 0;
+            color: #666;
+        }
+        .key-hint {
+            color: #666;
+            font-size: 14px;
+            margin: 5px 0;
+        }
+        .recording-exists {
+            color: #28a745;
+            font-size: 14px;
+            margin-top: 5px;
+        }
+        #jumpControls {
+            margin: 20px 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+        #jumpInput {
+            width: 60px;
+            font-size: 18px;
+            padding: 5px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <h1>Sentence Recorder</h1>
+    <div id="progress">
+        Sample <input type="number" id="sampleInput" min="1" max="720" value="1"> of 720
+        <button id="goButton">Go</button>
+    </div>
+    <div id="sentence">Loading...</div>
+    <div id="recordingStatus" class="recording-exists"></div>
+    <div id="timer">0:00</div>
+    <div id="controls">
+        <button id="recordButton">Start Recording (Space)</button>
+    </div>
+    <div id="navigation">
+        <button id="prevButton">&larr; Previous</button>
+        <button id="nextButton">Next &rarr;</button>
+    </div>
+    <div id="status"></div>
+    <div class="key-hint">
+        Space: Start/Stop Recording<br>
+        &larr;/&rarr;: Navigate between sentences<br>
+        Enter: Go to entered sample number<br>
+        Recordings are saved automatically
+    </div>
+
+    <script>
+        let mediaRecorder;
+        let audioChunks = [];
+        let currentSample = 1;
+        let recording = false;
+        let startTime;
+        let timerInterval;
+        
+        const recordButton = document.getElementById('recordButton');
+        const sentenceDisplay = document.getElementById('sentence');
+        const prevButton = document.getElementById('prevButton');
+        const nextButton = document.getElementById('nextButton');
+        const sampleInput = document.getElementById('sampleInput');
+        const goButton = document.getElementById('goButton');
+        const timerDisplay = document.getElementById('timer');
+        const statusDiv = document.getElementById('status');
+        const recordingStatus = document.getElementById('recordingStatus');
+
+        // Save current sample to localStorage
+        function saveProgress() {
+            localStorage.setItem('currentSample', currentSample);
+        }
+
+        // Load progress from localStorage
+        function loadProgress() {
+            const saved = localStorage.getItem('currentSample');
+            if (saved) {
+                currentSample = parseInt(saved);
+                sampleInput.value = currentSample;
+            }
+        }
+
+        async function loadSentence() {
+            try {
+                const response = await fetch(`/sentences/${currentSample}`);
+                const data = await response.json();
+                sentenceDisplay.textContent = data.text;
+                sampleInput.value = currentSample;
+                saveProgress();
+            } catch (error) {
+                sentenceDisplay.textContent = 'Error loading sentence';
+                console.error('Error loading sentence:', error);
+            }
+            
+            // Update navigation buttons
+            prevButton.disabled = currentSample === 1;
+            nextButton.disabled = currentSample === 720;
+            
+            // Check if recording exists
+            try {
+                const response = await fetch(`/check_recording/${currentSample}`);
+                const exists = await response.json();
+                recordingStatus.textContent = exists.exists ? 'Recording exists for this sample' : '';
+            } catch (error) {
+                recordingStatus.textContent = '';
+            }
+        }
+
+        function updateTimer() {
+            const elapsed = Math.floor((Date.now() - startTime) / 1000);
+            const minutes = Math.floor(elapsed / 60);
+            const seconds = elapsed % 60;
+            timerDisplay.textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+        }
+
+        async function uploadAudio(audioBlob) {
+            const formData = new FormData();
+            formData.append('audio', audioBlob, 'recording.wav');
+            formData.append('index', currentSample);
+            
+            try {
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (response.ok) {
+                    statusDiv.textContent = `Saved sample${currentSample.toString().padStart(3, '0')}.wav`;
+                    recordingStatus.textContent = 'Recording exists for this sample';
+                } else {
+                    throw new Error('Upload failed');
+                }
+            } catch (error) {
+                statusDiv.textContent = 'Error saving recording';
+                console.error('Error uploading:', error);
+            }
+        }
+
+        recordButton.addEventListener('click', async () => {
+            if (!recording) {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    mediaRecorder = new MediaRecorder(stream);
+                    audioChunks = [];
+
+                    mediaRecorder.addEventListener('dataavailable', event => {
+                        audioChunks.push(event.data);
+                    });
+
+                    mediaRecorder.addEventListener('stop', async () => {
+                        const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                        await uploadAudio(audioBlob);
+                        recordButton.textContent = 'Start Recording (Space)';
+                        recordButton.classList.remove('recording');
+                        timerDisplay.textContent = '0:00';
+                    });
+
+                    mediaRecorder.start();
+                    recording = true;
+                    startTime = Date.now();
+                    timerInterval = setInterval(updateTimer, 1000);
+                    recordButton.textContent = 'Stop Recording (Space)';
+                    recordButton.classList.add('recording');
+                    statusDiv.textContent = 'Recording...';
+                } catch (error) {
+                    console.error('Error accessing microphone:', error);
+                    statusDiv.textContent = 'Error: Could not access microphone';
+                }
+            } else {
+                mediaRecorder.stop();
+                mediaRecorder.stream.getTracks().forEach(track => track.stop());
+                recording = false;
+                clearInterval(timerInterval);
+            }
+        });
+
+        prevButton.addEventListener('click', () => {
+            if (currentSample > 1 && !recording) {
+                currentSample--;
+                loadSentence();
+            }
+        });
+
+        nextButton.addEventListener('click', () => {
+            if (currentSample < 720 && !recording) {
+                currentSample++;
+                loadSentence();
+            }
+        });
+
+        goButton.addEventListener('click', () => {
+            if (!recording) {
+                const newSample = parseInt(sampleInput.value);
+                if (newSample >= 1 && newSample <= 720) {
+                    currentSample = newSample;
+                    loadSentence();
+                }
+            }
+        });
+
+        sampleInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                goButton.click();
+            }
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.code === 'Space') {
+                e.preventDefault();
+                recordButton.click();
+            } else if (e.code === 'ArrowLeft' && !recording) {
+                prevButton.click();
+            } else if (e.code === 'ArrowRight' && !recording) {
+                nextButton.click();
+            }
+        });
+
+        // Load saved progress and start
+        loadProgress();
+        loadSentence();
+    </script>
+</body>
+</html>

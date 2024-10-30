@@ -1,12 +1,48 @@
 import os
 import torch
-from datasets import load_from_disk
+import datasets
+from datasets import load_from_disk, Dataset, DatasetDict
 from transformers import (
     WhisperForConditionalGeneration,
     WhisperProcessor,
     Seq2SeqTrainingArguments,
     Seq2SeqTrainer
 )
+
+
+def load_custom_dataset():
+    """Load dataset from prepared files and create train/test splits."""
+    # Read the prepared files
+    with open('data/audio_paths', 'r', encoding='utf-8') as f:
+        audio_paths = [line.strip().split(' ', 1)[1] for line in f.readlines()]
+
+    with open('data/text', 'r', encoding='utf-8') as f:
+        texts = [line.strip().split(' ', 1)[1] for line in f.readlines()]
+
+    # Create dataset entries
+    dataset_dict = {
+        'audio': [],
+        'sentence': []
+    }
+
+    audio_feature = datasets.Audio(sampling_rate=16000)
+
+    for audio_path, text in zip(audio_paths, texts):
+        # Create the audio dictionary format expected by decode_example
+        audio_dict = {'path': audio_path, 'bytes': None}
+        try:
+            audio_data = audio_feature.decode_example(audio_dict)
+            dataset_dict['audio'].append(audio_data)
+            dataset_dict['sentence'].append(text)
+        except Exception as e:
+            print(f"Error processing {audio_path}: {str(e)}")
+            continue
+
+    # Create dataset and split
+    full_dataset = Dataset.from_dict(dataset_dict)
+    split_dataset = full_dataset.train_test_split(test_size=0.1, seed=42)
+
+    return split_dataset
 
 
 def main():
@@ -32,7 +68,7 @@ def main():
 
     # Load dataset
     print("\nLoading custom dataset from prepared files")
-    dataset = load_from_disk("prepared_dataset")
+    dataset = load_custom_dataset()
 
     print(
         f"Dataset loaded: {len(dataset['train'])} training samples, {len(dataset['test'])} evaluation samples")
@@ -51,7 +87,7 @@ def main():
 
         # Process text
         labels = processor(
-            text=batch["text"],
+            text=batch["sentence"],  # Changed from "text" to "sentence"
             return_tensors="pt"
         ).input_ids[0]
 
@@ -61,33 +97,44 @@ def main():
         return batch
 
     dataset = dataset.map(
-        prepare_dataset, remove_columns=dataset["train"].column_names)
+        prepare_dataset,
+        remove_columns=dataset["train"].column_names,
+        num_proc=4
+    )
 
-    # Set up training arguments
+    # Set up training arguments optimized for ~720 samples
     training_args = Seq2SeqTrainingArguments(
         output_dir="whisper-fine-tuned",
-        per_device_train_batch_size=4,
-        gradient_accumulation_steps=1,
-        learning_rate=5e-6,
-        warmup_steps=50,
-        max_steps=500,
-        gradient_checkpointing=True,
-        fp16=True,
-        eval_steps=25,
-        eval_strategy="steps",  # Updated from evaluation_strategy
-        save_steps=50,
+        per_device_train_batch_size=2,          # Smaller batch size to prevent OOM
+        # Accumulate gradients to simulate batch size of 16
+        gradient_accumulation_steps=8,
+        # Slightly higher learning rate for smaller dataset
+        learning_rate=1e-5,
+        warmup_steps=100,                       # More warmup steps for stability
+        max_steps=1000,                         # Increased steps for better convergence
+        gradient_checkpointing=True,            # Save memory
+        fp16=True,                              # Use mixed precision
+        evaluation_strategy="steps",
+        eval_steps=50,                          # Evaluate more frequently
+        save_strategy="steps",
+        save_steps=100,                         # Save checkpoints more frequently
         logging_steps=25,
         report_to=["tensorboard"],
         load_best_model_at_end=True,
         metric_for_best_model="wer",
         greater_is_better=False,
         push_to_hub=False,
+        generation_max_length=225,
+        predict_with_generate=True,
+        remove_unused_columns=False,
+        dataloader_pin_memory=True,             # Faster data transfer
+        dataloader_num_workers=0,               # Avoid multiprocessing issues
     )
 
     # Data collator
     def data_collator(features):
         input_features = [{"input_features": feature["input_features"]}
-            for feature in features]
+                          for feature in features]
         labels = [feature["labels"] for feature in features]
 
         batch = processor.feature_extractor.pad(
@@ -134,7 +181,7 @@ def main():
     # Update generation config
     model.generation_config.max_length = 448
     model.generation_config.suppress_tokens = [1, 2, 7, 8, 9, 10, 14, 25, 26, 27, 28, 29, 31, 58, 59, 60, 61, 62, 63, 90, 91, 92, 93, 359, 503, 522, 542, 873, 893, 902, 918, 922, 931, 1350, 1853, 1982, 2460, 2627, 3246, 3253, 3268, 3536, 3846, 3961, 4183, 4667, 6585, 6647, 7273,
-        9061, 9383, 10428, 10929, 11938, 12033, 12331, 12562, 13793, 14157, 14635, 15265, 15618, 16553, 16604, 18362, 18956, 20075, 21675, 22520, 26130, 26161, 26435, 28279, 29464, 31650, 32302, 32470, 36865, 42863, 47425, 49870, 50254, 50258, 50358, 50359, 50360, 50361, 50362]
+                                               9061, 9383, 10428, 10929, 11938, 12033, 12331, 12562, 13793, 14157, 14635, 15265, 15618, 16553, 16604, 18362, 18956, 20075, 21675, 22520, 26130, 26161, 26435, 28279, 29464, 31650, 32302, 32470, 36865, 42863, 47425, 49870, 50254, 50258, 50358, 50359, 50360, 50361, 50362]
     model.generation_config.begin_suppress_tokens = [220, 50257]
 
     # For multilingual models, explicitly set language to English
@@ -149,69 +196,16 @@ def main():
         eval_dataset=dataset["test"],
         data_collator=data_collator,
         compute_metrics=compute_metrics,
-        processing_class=processor,  # Updated from tokenizer
+        tokenizer=processor.feature_extractor,
     )
 
-    print("\nStarting training...")
-    trainer.train()
-
-    # Save the fine-tuned model
-    trainer.save_model()
-
-        prepare_dataset_with_processor,
-        remove_columns = train_dataset.column_names,
-        batch_size = 1
-    )
-    eval_dataset= eval_dataset.map(
-        prepare_dataset_with_processor,
-        remove_columns = eval_dataset.column_names,
-        batch_size = 1
-    )
-
-    # Create data collator
-    data_collator= DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
-
-    # Define training arguments optimized for small dataset
-    training_args= Seq2SeqTrainingArguments(
-        output_dir = "./whisper-fine-tuned",
-        per_device_train_batch_size = 4,       # Reduced batch size
-        per_device_eval_batch_size = 4,        # Reduced eval batch size
-        gradient_accumulation_steps = 4,        # Increased gradient accumulation
-        learning_rate = 5e-6,
-        warmup_steps = 50,
-        max_steps = 500,                       # Reduced steps for small dataset
-        fp16 = True,                           # Enable mixed precision training
-        gradient_checkpointing = True,         # Enable gradient checkpointing
-        evaluation_strategy = "steps",
-        predict_with_generate = True,
-        generation_max_length = 225,
-        save_steps = 25,
-        eval_steps = 25,
-        logging_steps = 5,
-        report_to = ["tensorboard"],
-        load_best_model_at_end = True,
-        metric_for_best_model = "wer",
-        greater_is_better = False,
-        dataloader_num_workers = 0,            # Disable multiprocessing
-        dataloader_pin_memory = True,          # Keep pin memory for faster data transfer
-        remove_unused_columns = False,         # Keep all columns
-    )
-
-    # Create Trainer instance
-    trainer= Seq2SeqTrainer(
-        model = model,
-        data_collator = data_collator,
-        args = training_args,
-        compute_metrics = compute_metrics,
-        train_dataset = train_dataset,
-        eval_dataset = eval_dataset,
-        tokenizer = processor.feature_extractor,
-    )
-
-    # Start training
     print("\nStarting training...")
     trainer.train()
 
     # Save the fine-tuned model
     trainer.save_model("./whisper-fine-tuned/final")
     print("\nTraining completed and model saved to ./whisper-fine-tuned/final")
+
+
+if __name__ == "__main__":
+    main()
